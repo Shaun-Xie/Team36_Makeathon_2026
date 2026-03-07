@@ -18,9 +18,11 @@ AUDIO_DEVICE = None  # Example: "hw:1,0"
 USE_GPIO_BUTTON = False
 BUTTON_GPIO_PIN = 18
 BUTTON_BOUNCE_TIME = 0.10
-TTS_ENABLED = False
+TTS_ENABLED = True
 TTS_COMMAND = "espeak-ng"
 TTS_RATE = 165
+TTS_OUTPUT_DEVICE = os.getenv("TTS_OUTPUT_DEVICE", "default")
+# Example Bluetooth ALSA device (if available): bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
 SYSTEM_PROMPT = (
     "You are an interactive educational guide for a zoo environment. "
     "Explain things clearly, briefly, and engagingly for general visitors. "
@@ -85,6 +87,25 @@ def ensure_tts_available() -> None:
         raise RuntimeError(
             f"`{TTS_COMMAND}` was not found. Install it with: sudo apt install -y espeak-ng"
         )
+    if shutil.which("aplay") is None:
+        raise RuntimeError(
+            "`aplay` was not found. Install ALSA utils: sudo apt install -y alsa-utils"
+        )
+    if TTS_OUTPUT_DEVICE and TTS_OUTPUT_DEVICE != "default":
+        result = subprocess.run(
+            ["aplay", "-L"], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or "Unknown error"
+            raise RuntimeError(
+                "Could not list playback devices with `aplay -L`.\n"
+                f"aplay error: {stderr}"
+            )
+        if not TTS_OUTPUT_DEVICE.startswith("hw:") and TTS_OUTPUT_DEVICE not in result.stdout:
+            raise RuntimeError(
+                f"TTS_OUTPUT_DEVICE '{TTS_OUTPUT_DEVICE}' not found in `aplay -L` output.\n"
+                "Run `aplay -L` and set a valid playback device."
+            )
 
 
 def create_gpio_button(pin: int):
@@ -184,18 +205,51 @@ def get_assistant_response(client, transcript: str) -> str:
 
 
 def speak_text(text: str) -> None:
-    """Speak assistant text locally on Raspberry Pi using espeak-ng."""
+    """Speak assistant text using espeak-ng and play via a selected ALSA output device."""
     if not TTS_ENABLED:
         return
-    result = subprocess.run(
-        [TTS_COMMAND, "-s", str(TTS_RATE), text],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.strip() or "Unknown TTS error"
-        raise RuntimeError(f"TTS playback failed.\n{TTS_COMMAND} error: {stderr}")
+    tts_wav = None
+    try:
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix="tts_output_", suffix=".wav", delete=False
+        )
+        tts_wav = temp_file.name
+        with temp_file:
+            result = subprocess.run(
+                [TTS_COMMAND, "--stdout", "-s", str(TTS_RATE), text],
+                stdout=temp_file,
+                stderr=subprocess.PIPE,
+                text=False,
+                check=False,
+            )
+
+        if result.returncode != 0:
+            stderr = (
+                result.stderr.decode("utf-8", errors="replace").strip()
+                if result.stderr
+                else "Unknown TTS synthesis error"
+            )
+            raise RuntimeError(f"TTS synthesis failed.\n{TTS_COMMAND} error: {stderr}")
+
+        wav_path = Path(tts_wav)
+        if not wav_path.exists() or wav_path.stat().st_size <= 44:
+            raise RuntimeError("TTS synthesis failed: output WAV is empty.")
+
+        playback_cmd = ["aplay", "-q"]
+        if TTS_OUTPUT_DEVICE and TTS_OUTPUT_DEVICE != "default":
+            playback_cmd.extend(["-D", TTS_OUTPUT_DEVICE])
+        playback_cmd.append(tts_wav)
+
+        playback = subprocess.run(playback_cmd, capture_output=True, text=True, check=False)
+        if playback.returncode != 0:
+            stderr = playback.stderr.strip() or "Unknown playback error"
+            raise RuntimeError(
+                "TTS playback failed while sending audio to output device.\n"
+                f"aplay error: {stderr}"
+            )
+    finally:
+        if tts_wav:
+            cleanup_temp_file(tts_wav)
 
 
 def cleanup_temp_file(path: str) -> None:
@@ -256,7 +310,10 @@ def main_loop() -> int:
     print(f"Recorder: arecord | Duration: {RECORD_SECONDS}s")
     print(f"Sample rate: {SAMPLE_RATE} Hz | Channels: {CHANNELS}")
     print(f"Audio device: {AUDIO_DEVICE or 'default'}")
-    print(f"TTS: {'enabled' if TTS_ENABLED else 'disabled'} ({TTS_COMMAND})")
+    print(
+        f"TTS: {'enabled' if TTS_ENABLED else 'disabled'} "
+        f"({TTS_COMMAND} -> {TTS_OUTPUT_DEVICE})"
+    )
     if USE_GPIO_BUTTON:
         print(f"Input mode: GPIO button on BCM pin {BUTTON_GPIO_PIN}")
         print("Press the GPIO button to record. Use Ctrl+C to exit.\n")

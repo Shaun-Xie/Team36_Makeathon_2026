@@ -8,7 +8,7 @@ This first checkpoint is a terminal-based Python app for Raspberry Pi 4 Model B 
 3. Sends the WAV file to OpenAI speech-to-text
 4. Sends the transcript to an OpenAI text model
 5. Prints transcript and assistant response
-6. Speaks the assistant response locally on the Pi (`espeak-ng`)
+6. Speaks the assistant response through a configurable ALSA output device (`espeak-ng` + `aplay`)
 7. Loops until you type `q` or `quit`
 
 This is intentionally a simple sequential flow (no realtime streaming, no WebSockets, no GUI).
@@ -41,13 +41,53 @@ Install system packages:
 
 ```bash
 sudo apt update
-sudo apt install -y alsa-utils python3-venv espeak-ng
+sudo apt install -y alsa-utils python3-venv espeak-ng bluez
 ```
 
-Quick speaker test:
+Quick TTS test on current default output:
 
 ```bash
 espeak-ng "Speaker test on Raspberry Pi"
+```
+
+## Pair a Bluetooth speaker (headless)
+Start Bluetooth service:
+
+```bash
+sudo systemctl enable --now bluetooth
+```
+
+Pair and connect speaker (replace `AA:BB:CC:DD:EE:FF`):
+
+```bash
+bluetoothctl
+power on
+agent on
+default-agent
+scan on
+# wait until you see your speaker MAC, then:
+pair AA:BB:CC:DD:EE:FF
+trust AA:BB:CC:DD:EE:FF
+connect AA:BB:CC:DD:EE:FF
+exit
+```
+
+List playback devices and note the Bluetooth ALSA name:
+
+```bash
+aplay -L
+```
+
+Set the output device for TTS in your current shell:
+
+```bash
+export TTS_OUTPUT_DEVICE="bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp"
+```
+
+If your Bluetooth stack routes audio as default already, keep:
+
+```bash
+export TTS_OUTPUT_DEVICE="default"
 ```
 
 ## Verify microphone detection
@@ -105,6 +145,7 @@ cp .env.example .env
 ```
 
 Edit `.env` and set your key.
+You can also set `TTS_OUTPUT_DEVICE` there.
 
 Load it into your shell:
 
@@ -118,6 +159,7 @@ Verify:
 
 ```bash
 echo "${OPENAI_API_KEY:0:10}..."
+echo "$TTS_OUTPUT_DEVICE"
 ```
 
 ## Configure microphone device (optional)
@@ -189,10 +231,18 @@ arecord -l
 - If model access differs on your account, change `TRANSCRIPTION_MODEL` or `RESPONSE_MODEL` constants in `voice_milestone.py`.
 
 ### No speech output from assistant response
-- Confirm speaker/headphone output works from Pi.
-- Test TTS directly:
+- Confirm the speaker is connected:
   ```bash
-  espeak-ng "This is a test"
+  bluetoothctl info AA:BB:CC:DD:EE:FF
+  ```
+- Confirm output device name exists:
+  ```bash
+  aplay -L
+  ```
+- Test TTS and output path directly:
+  ```bash
+  espeak-ng --stdout "This is a test" > /tmp/tts_test.wav
+  aplay -D "$TTS_OUTPUT_DEVICE" /tmp/tts_test.wav
   ```
 - If needed, disable TTS by setting `TTS_ENABLED = False`.
 
