@@ -139,10 +139,8 @@ def get_assistant_response(client, transcript: str) -> str:
     try:
         response = client.responses.create(
             model=RESPONSE_MODEL,
-            input=[
-                {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
-                {"role": "user", "content": [{"type": "text", "text": transcript}]},
-            ],
+            instructions=SYSTEM_PROMPT,
+            input=transcript,
         )
     except Exception as exc:
         raise RuntimeError(f"Failed text model request: {exc}") from exc
