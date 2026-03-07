@@ -18,11 +18,15 @@ AUDIO_DEVICE = None  # Example: "hw:1,0"
 USE_GPIO_BUTTON = False
 BUTTON_GPIO_PIN = 18
 BUTTON_BOUNCE_TIME = 0.10
+
 TTS_ENABLED = True
-TTS_COMMAND = "espeak-ng"
-TTS_RATE = 165
+ELEVENLABS_MODEL_ID = "eleven_turbo_v2_5"
+ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+ELEVENLABS_OUTPUT_FORMAT = "pcm_16000"
+ELEVENLABS_SAMPLE_RATE = 16000
+ELEVENLABS_CHANNELS = 1
 TTS_OUTPUT_DEVICE = os.getenv("TTS_OUTPUT_DEVICE", "default")
-# Example Bluetooth ALSA device (if available): bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
+# Example Bluetooth ALSA device: bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
 
 SYSTEM_PROMPT = (
     "You are a friendly interactive zoo guide speaking with visitors in real time. "
@@ -46,6 +50,16 @@ def check_api_key() -> str:
     return api_key
 
 
+def check_elevenlabs_api_key() -> str:
+    """Return ELEVENLABS_API_KEY or raise a clear error."""
+    api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Missing ELEVENLABS_API_KEY. Export it in your shell before running."
+        )
+    return api_key
+
+
 def create_openai_client(api_key: str):
     """Create OpenAI client with current SDK style."""
     try:
@@ -56,6 +70,18 @@ def create_openai_client(api_key: str):
         ) from exc
 
     return OpenAI(api_key=api_key)
+
+
+def create_elevenlabs_client(api_key: str):
+    """Create ElevenLabs SDK client."""
+    try:
+        from elevenlabs.client import ElevenLabs
+    except ImportError as exc:
+        raise RuntimeError(
+            "ElevenLabs package is not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+    return ElevenLabs(api_key=api_key)
 
 
 def ensure_recorder_available(audio_device: Optional[str]) -> None:
@@ -85,17 +111,15 @@ def ensure_recorder_available(audio_device: Optional[str]) -> None:
 
 
 def ensure_tts_available() -> None:
-    """Verify local text-to-speech command exists when enabled."""
+    """Verify local playback path and output device when TTS is enabled."""
     if not TTS_ENABLED:
         return
-    if shutil.which(TTS_COMMAND) is None:
-        raise RuntimeError(
-            f"`{TTS_COMMAND}` was not found. Install it with: sudo apt install -y espeak-ng"
-        )
+
     if shutil.which("aplay") is None:
         raise RuntimeError(
             "`aplay` was not found. Install ALSA utils: sudo apt install -y alsa-utils"
         )
+
     if TTS_OUTPUT_DEVICE and TTS_OUTPUT_DEVICE != "default":
         result = subprocess.run(
             ["aplay", "-L"], capture_output=True, text=True, check=False
@@ -106,6 +130,7 @@ def ensure_tts_available() -> None:
                 "Could not list playback devices with `aplay -L`.\n"
                 f"aplay error: {stderr}"
             )
+
         if not TTS_OUTPUT_DEVICE.startswith("hw:") and TTS_OUTPUT_DEVICE not in result.stdout:
             raise RuntimeError(
                 f"TTS_OUTPUT_DEVICE '{TTS_OUTPUT_DEVICE}' not found in `aplay -L` output.\n"
@@ -209,64 +234,101 @@ def get_assistant_response(client, transcript: str) -> str:
     return reply
 
 
-def speak_text(text: str) -> None:
-    """Speak assistant text using espeak-ng and play via a selected ALSA output device."""
+def synthesize_speech(client, text: str) -> str:
+    """Generate ElevenLabs PCM audio from text and return temp file path."""
+    if not text.strip():
+        raise RuntimeError("Cannot synthesize empty text.")
+
+    temp_pcm = tempfile.NamedTemporaryFile(
+        prefix="elevenlabs_tts_", suffix=".pcm", delete=False
+    )
+    temp_pcm_path = temp_pcm.name
+    temp_pcm.close()
+
+    try:
+        audio_stream = client.text_to_speech.convert(
+            voice_id=ELEVENLABS_VOICE_ID,
+            model_id=ELEVENLABS_MODEL_ID,
+            output_format=ELEVENLABS_OUTPUT_FORMAT,
+            text=text,
+        )
+    except Exception as exc:
+        cleanup_temp_file(temp_pcm_path)
+        raise RuntimeError(f"ElevenLabs request failed: {exc}") from exc
+
+    bytes_written = 0
+    try:
+        with open(temp_pcm_path, "wb") as audio_file:
+            if isinstance(audio_stream, (bytes, bytearray)):
+                audio_file.write(audio_stream)
+                bytes_written += len(audio_stream)
+            else:
+                for chunk in audio_stream:
+                    if isinstance(chunk, (bytes, bytearray)) and chunk:
+                        audio_file.write(chunk)
+                        bytes_written += len(chunk)
+    except OSError as exc:
+        cleanup_temp_file(temp_pcm_path)
+        raise RuntimeError(f"Failed writing ElevenLabs audio file: {exc}") from exc
+
+    if bytes_written == 0:
+        cleanup_temp_file(temp_pcm_path)
+        raise RuntimeError("ElevenLabs returned empty audio.")
+
+    return temp_pcm_path
+
+
+def play_audio_file(path: str) -> None:
+    """Play a PCM audio file with ALSA on Raspberry Pi/Linux."""
+    audio_path = Path(path)
+    if not audio_path.exists() or audio_path.stat().st_size == 0:
+        raise RuntimeError("Playback failed: audio file is missing or empty.")
+
+    cmd = [
+        "aplay",
+        "-q",
+        "-f",
+        "S16_LE",
+        "-r",
+        str(ELEVENLABS_SAMPLE_RATE),
+        "-c",
+        str(ELEVENLABS_CHANNELS),
+    ]
+    if TTS_OUTPUT_DEVICE and TTS_OUTPUT_DEVICE != "default":
+        cmd.extend(["-D", TTS_OUTPUT_DEVICE])
+    cmd.append(path)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "Unknown playback error"
+        raise RuntimeError(f"Playback failed.\naplay error: {stderr}")
+
+
+def speak_text(client, text: str) -> None:
+    """Synthesize and play assistant speech using ElevenLabs."""
     if not TTS_ENABLED:
         return
-    tts_wav = None
+
+    temp_pcm_path = None
     try:
-        temp_file = tempfile.NamedTemporaryFile(
-            prefix="tts_output_", suffix=".wav", delete=False
-        )
-        tts_wav = temp_file.name
-        with temp_file:
-            result = subprocess.run(
-                [TTS_COMMAND, "--stdout", "-s", str(TTS_RATE), text],
-                stdout=temp_file,
-                stderr=subprocess.PIPE,
-                text=False,
-                check=False,
-            )
-
-        if result.returncode != 0:
-            stderr = (
-                result.stderr.decode("utf-8", errors="replace").strip()
-                if result.stderr
-                else "Unknown TTS synthesis error"
-            )
-            raise RuntimeError(f"TTS synthesis failed.\n{TTS_COMMAND} error: {stderr}")
-
-        wav_path = Path(tts_wav)
-        if not wav_path.exists() or wav_path.stat().st_size <= 44:
-            raise RuntimeError("TTS synthesis failed: output WAV is empty.")
-
-        playback_cmd = ["aplay", "-q"]
-        if TTS_OUTPUT_DEVICE and TTS_OUTPUT_DEVICE != "default":
-            playback_cmd.extend(["-D", TTS_OUTPUT_DEVICE])
-        playback_cmd.append(tts_wav)
-
-        playback = subprocess.run(playback_cmd, capture_output=True, text=True, check=False)
-        if playback.returncode != 0:
-            stderr = playback.stderr.strip() or "Unknown playback error"
-            raise RuntimeError(
-                "TTS playback failed while sending audio to output device.\n"
-                f"aplay error: {stderr}"
-            )
+        temp_pcm_path = synthesize_speech(client, text)
+        play_audio_file(temp_pcm_path)
     finally:
-        if tts_wav:
-            cleanup_temp_file(tts_wav)
+        cleanup_temp_file(temp_pcm_path)
 
 
-def cleanup_temp_file(path: str) -> None:
+def cleanup_temp_file(path: Optional[str]) -> None:
     """Best-effort temp file cleanup."""
+    if not path:
+        return
     try:
-        if path and Path(path).exists():
+        if Path(path).exists():
             os.remove(path)
     except OSError as exc:
         print(f"[WARN] Could not remove temp file {path}: {exc}")
 
 
-def run_interaction_cycle(client) -> None:
+def run_interaction_cycle(openai_client, elevenlabs_client=None) -> None:
     """Run one record -> transcribe -> respond cycle."""
     wav_path = create_temp_wav_path()
     try:
@@ -274,21 +336,24 @@ def run_interaction_cycle(client) -> None:
         record_audio(wav_path, seconds=RECORD_SECONDS)
 
         print("Transcribing with OpenAI...")
-        transcript = transcribe_audio(client, wav_path)
+        transcript = transcribe_audio(openai_client, wav_path)
         print("\nTranscript:")
         print(transcript)
 
         print("\nGenerating assistant response...")
-        response = get_assistant_response(client, transcript)
+        response = get_assistant_response(openai_client, transcript)
         print("\nAssistant response:")
         print(response)
 
-        if TTS_ENABLED:
-            print("\nSpeaking response...")
+        if TTS_ENABLED and elevenlabs_client is not None:
+            print("\nSpeaking response with ElevenLabs...")
             try:
-                speak_text(response)
+                speak_text(elevenlabs_client, response)
             except RuntimeError as exc:
                 print(f"[WARN] {exc}")
+        elif TTS_ENABLED:
+            print("\n[WARN] TTS is enabled but ElevenLabs is not configured.")
+
         print()
     except RuntimeError as exc:
         print(f"[ERROR] {exc}\n")
@@ -299,16 +364,28 @@ def run_interaction_cycle(client) -> None:
 def main_loop() -> int:
     """Interactive terminal loop."""
     button = None
+    elevenlabs_client = None
+    tts_ready = False
+
     try:
-        api_key = check_api_key()
-        client = create_openai_client(api_key)
+        openai_api_key = check_api_key()
+        openai_client = create_openai_client(openai_api_key)
         ensure_recorder_available(AUDIO_DEVICE)
-        ensure_tts_available()
+
         if USE_GPIO_BUTTON:
             button = create_gpio_button(BUTTON_GPIO_PIN)
     except RuntimeError as exc:
         print(f"[ERROR] {exc}")
         return 1
+
+    if TTS_ENABLED:
+        try:
+            elevenlabs_api_key = check_elevenlabs_api_key()
+            elevenlabs_client = create_elevenlabs_client(elevenlabs_api_key)
+            ensure_tts_available()
+            tts_ready = True
+        except RuntimeError as exc:
+            print(f"[WARN] ElevenLabs TTS disabled: {exc}")
 
     print("Raspberry Pi Voice Input Milestone")
     print("----------------------------------")
@@ -316,9 +393,11 @@ def main_loop() -> int:
     print(f"Sample rate: {SAMPLE_RATE} Hz | Channels: {CHANNELS}")
     print(f"Audio device: {AUDIO_DEVICE or 'default'}")
     print(
-        f"TTS: {'enabled' if TTS_ENABLED else 'disabled'} "
-        f"({TTS_COMMAND} -> {TTS_OUTPUT_DEVICE})"
+        f"TTS: {'enabled' if tts_ready else 'disabled'} "
+        f"(ElevenLabs voice={ELEVENLABS_VOICE_ID}, model={ELEVENLABS_MODEL_ID}, "
+        f"output={TTS_OUTPUT_DEVICE})"
     )
+
     if USE_GPIO_BUTTON:
         print(f"Input mode: GPIO button on BCM pin {BUTTON_GPIO_PIN}")
         print("Press the GPIO button to record. Use Ctrl+C to exit.\n")
@@ -332,7 +411,7 @@ def main_loop() -> int:
                 assert button is not None
                 button.wait_for_press()
                 print("> Button pressed")
-                run_interaction_cycle(client)
+                run_interaction_cycle(openai_client, elevenlabs_client)
                 button.wait_for_release()
             else:
                 try:
@@ -347,7 +426,8 @@ def main_loop() -> int:
                 if user_input:
                     print("Press Enter to record, or type q / quit to exit.")
                     continue
-                run_interaction_cycle(client)
+
+                run_interaction_cycle(openai_client, elevenlabs_client)
     finally:
         if button is not None:
             button.close()

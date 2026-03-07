@@ -1,31 +1,27 @@
-# Raspberry Pi Voice Input Milestone
+# Raspberry Pi Voice Input Milestone (OpenAI + ElevenLabs)
 
 ## What this prototype does
-This first checkpoint is a terminal-based Python app for Raspberry Pi 4 Model B that:
+This terminal-based Raspberry Pi 4 app does:
 
-1. Records a short microphone clip locally on the Pi (`arecord`)
-2. Saves it as a temporary WAV file
-3. Sends the WAV file to OpenAI speech-to-text
-4. Sends the transcript to an OpenAI text model
-5. Prints transcript and assistant response
-6. Speaks the assistant response through a configurable ALSA output device (`espeak-ng` + `aplay`)
-7. Loops until you type `q` or `quit`
+1. Record a short local microphone clip with `arecord`
+2. Transcribe it with OpenAI speech-to-text
+3. Generate a response with an OpenAI model
+4. Print transcript and assistant response
+5. Synthesize assistant speech with ElevenLabs
+6. Play synthesized audio through ALSA output (including Bluetooth speaker)
 
-This is intentionally a simple sequential flow (no realtime streaming, no WebSockets, no GUI).
+This remains a simple sequential flow (no realtime streaming, no WebSockets, no GUI).
 
-## Why this is the right first milestone
-It validates the core input pipeline end-to-end with minimal moving parts:
-
-`Mic on Pi -> local WAV -> OpenAI transcription -> OpenAI response -> terminal output`
-
-If this works reliably, later robot features (buttons, speakers, movement, exhibit routing, realtime modes) are much easier to add.
-
-## Hardware assumptions
-- Raspberry Pi 4 Model B running Linux
-- One microphone input path:
-  - USB microphone, or
-  - Pi-compatible microphone module recognized as an ALSA input device
-- Internet access for OpenAI API calls
+## What changed in this refactor
+- Replaced local `espeak-ng` synthesis with ElevenLabs Text-to-Speech API.
+- Added `ELEVENLABS_API_KEY` environment variable support.
+- Added ElevenLabs synthesis helpers:
+  - `synthesize_speech(client, text)`
+  - `play_audio_file(path)`
+  - `speak_text(client, text)`
+- Kept mic recording, OpenAI transcription, and OpenAI response flow unchanged.
+- Kept printed assistant responses for debugging.
+- Kept graceful behavior: if TTS setup/request/playback fails, text still prints.
 
 ## Project structure
 ```text
@@ -37,27 +33,25 @@ If this works reliably, later robot features (buttons, speakers, movement, exhib
 ```
 
 ## Raspberry Pi / Linux prerequisites
-Install system packages:
+Install required system packages:
 
 ```bash
 sudo apt update
-sudo apt install -y alsa-utils python3-venv espeak-ng bluez
+sudo apt install -y alsa-utils python3-venv bluez
 ```
 
-Quick TTS test on current default output:
+Notes:
+- `arecord` and `aplay` come from `alsa-utils`.
+- `bluez` is used to pair/connect Bluetooth speakers.
 
-```bash
-espeak-ng "Speaker test on Raspberry Pi"
-```
-
-## Pair a Bluetooth speaker (headless)
+## Pair Bluetooth speaker (headless)
 Start Bluetooth service:
 
 ```bash
 sudo systemctl enable --now bluetooth
 ```
 
-Pair and connect speaker (replace `AA:BB:CC:DD:EE:FF`):
+Pair and connect speaker:
 
 ```bash
 bluetoothctl
@@ -65,89 +59,68 @@ power on
 agent on
 default-agent
 scan on
-# wait until you see your speaker MAC, then:
+# after you see your speaker MAC:
 pair AA:BB:CC:DD:EE:FF
 trust AA:BB:CC:DD:EE:FF
 connect AA:BB:CC:DD:EE:FF
 exit
 ```
 
-List playback devices and note the Bluetooth ALSA name:
+List playback devices:
 
 ```bash
 aplay -L
 ```
 
-Set the output device for TTS in your current shell:
+Use a Bluetooth ALSA device in `TTS_OUTPUT_DEVICE` (example):
 
 ```bash
 export TTS_OUTPUT_DEVICE="bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp"
 ```
 
-If your Bluetooth stack routes audio as default already, keep:
+If your system already routes Bluetooth as default output:
 
 ```bash
 export TTS_OUTPUT_DEVICE="default"
 ```
 
 ## Verify microphone detection
-List capture hardware devices:
-
 ```bash
 arecord -l
-```
-
-List ALSA PCM device names:
-
-```bash
 arecord -L
 ```
 
-If your mic appears in `arecord -l`, note its card/device numbers (for example `card 1, device 0` -> `hw:1,0`).
-
-## Manual local recording test (before Python)
-Default device test:
+Manual recording test:
 
 ```bash
-arecord -f S16_LE -r 16000 -c 1 -d 5 test_mic.wav
-aplay test_mic.wav
+arecord -f S16_LE -r 16000 -c 1 -d 5 /tmp/test_mic.wav
+aplay /tmp/test_mic.wav
 ```
-
-Specific device test (example `hw:1,0`):
-
-```bash
-arecord -D hw:1,0 -f S16_LE -r 16000 -c 1 -d 5 test_mic.wav
-aplay test_mic.wav
-```
-
-If playback is silent or fails, fix ALSA/mic setup first.
 
 ## Python environment setup
-Create and activate a virtual environment:
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Configure `OPENAI_API_KEY`
-Create your `.env` file:
+## Environment variables
+Create `.env` from example:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and set your key.
-You can also set `TTS_OUTPUT_DEVICE` there.
+Edit `.env` with:
 
-Load it into your shell:
+```bash
+OPENAI_API_KEY=your_openai_api_key_here
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+TTS_OUTPUT_DEVICE=default
+```
+
+Load variables:
 
 ```bash
 set -a
@@ -159,96 +132,113 @@ Verify:
 
 ```bash
 echo "${OPENAI_API_KEY:0:10}..."
+echo "${ELEVENLABS_API_KEY:0:10}..."
 echo "$TTS_OUTPUT_DEVICE"
 ```
 
-## Configure microphone device (optional)
-In `voice_milestone.py`, set `AUDIO_DEVICE`:
-
-- `AUDIO_DEVICE = None` uses system default ALSA capture device
-- `AUDIO_DEVICE = "hw:1,0"` forces a specific input device
-
-Keep `RECORD_SECONDS`, `SAMPLE_RATE`, and `CHANNELS` in the constants section for easy tuning.
-
-## Run the milestone
+## Run the app
 ```bash
 python voice_milestone.py
 ```
 
-Expected loop:
-- Press Enter to record a ~5s clip
+Loop behavior:
+- Press `Enter` to record
 - Transcript prints
-- Assistant response prints and is spoken
-- Repeat until `q` / `quit`
+- Assistant response prints
+- ElevenLabs audio plays
+- Type `q` or `quit` to exit
+
+## Test ElevenLabs TTS path independently
+Run this standalone test on the Pi:
+
+```bash
+python - <<'PY'
+import os
+import subprocess
+from elevenlabs.client import ElevenLabs
+
+voice_id = "EXAVITQu4vr4xnSDxMaL"
+model_id = "eleven_turbo_v2_5"
+output_format = "pcm_16000"
+output_device = os.getenv("TTS_OUTPUT_DEVICE", "default")
+api_key = os.getenv("ELEVENLABS_API_KEY")
+
+if not api_key:
+    raise SystemExit("Missing ELEVENLABS_API_KEY")
+
+client = ElevenLabs(api_key=api_key)
+audio = client.text_to_speech.convert(
+    voice_id=voice_id,
+    model_id=model_id,
+    output_format=output_format,
+    text="Hello from ElevenLabs on Raspberry Pi.",
+)
+
+path = "/tmp/elevenlabs_test.pcm"
+written = 0
+with open(path, "wb") as f:
+    for chunk in audio:
+        if chunk:
+            f.write(chunk)
+            written += len(chunk)
+
+if written == 0:
+    raise SystemExit("ElevenLabs returned empty audio")
+
+cmd = ["aplay", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1"]
+if output_device != "default":
+    cmd += ["-D", output_device]
+cmd.append(path)
+subprocess.run(cmd, check=True)
+print("Played:", path)
+PY
+```
 
 ## Troubleshooting
-### No mic detected
+### Missing `ELEVENLABS_API_KEY`
 ```bash
-arecord -l
+echo "$ELEVENLABS_API_KEY"
 ```
-- If no capture devices are listed, check wiring/USB connection.
-- For USB mics, replug and run `lsusb`.
-- Restart Pi and retest.
+If empty, reload `.env`:
+```bash
+set -a
+source .env
+set +a
+```
 
-### ALSA errors
-- Confirm `arecord` exists:
-  ```bash
-  which arecord
-  ```
-- Inspect named devices:
-  ```bash
-  arecord -L
-  ```
-- Try explicit device (`hw:x,y`) in script constant `AUDIO_DEVICE`.
-- If permission issues appear, add user to `audio` group and relog:
-  ```bash
-  sudo usermod -aG audio "$USER"
-  ```
+### ElevenLabs package not installed
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-### Silent recordings
-- Open mixer and check capture gain / mute:
-  ```bash
-  alsamixer
-  ```
-- Select correct sound card in `alsamixer` (`F6`), ensure capture channel is enabled.
-- Retest manually with `arecord ...` and `aplay ...` before running Python.
+### Invalid voice/model settings
+- Check `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL_ID`, and `ELEVENLABS_OUTPUT_FORMAT` in `voice_milestone.py`.
+- If ElevenLabs rejects the request, the app prints a warning and continues with text output.
 
-### API key issues
-- Ensure `OPENAI_API_KEY` is exported in current shell:
-  ```bash
-  echo "$OPENAI_API_KEY"
-  ```
-- If empty, reload `.env`:
-  ```bash
-  set -a
-  source .env
-  set +a
-  ```
+### Playback tool missing
+```bash
+which aplay
+sudo apt install -y alsa-utils
+```
 
-### OpenAI request failures
-- Confirm internet access from Pi.
-- Confirm key is valid and has API access.
-- If model access differs on your account, change `TRANSCRIPTION_MODEL` or `RESPONSE_MODEL` constants in `voice_milestone.py`.
+### No audio output
+```bash
+aplay -L
+```
+- Confirm `TTS_OUTPUT_DEVICE` matches a valid playback device.
+- Test direct playback:
+```bash
+aplay -D "$TTS_OUTPUT_DEVICE" -f S16_LE -r 16000 -c 1 /tmp/elevenlabs_test.pcm
+```
 
-### No speech output from assistant response
-- Confirm the speaker is connected:
-  ```bash
-  bluetoothctl info AA:BB:CC:DD:EE:FF
-  ```
-- Confirm output device name exists:
-  ```bash
-  aplay -L
-  ```
-- Test TTS and output path directly:
-  ```bash
-  espeak-ng --stdout "This is a test" > /tmp/tts_test.wav
-  aplay -D "$TTS_OUTPUT_DEVICE" /tmp/tts_test.wav
-  ```
-- If needed, disable TTS by setting `TTS_ENABLED = False`.
+### Network/API failure
+- Confirm Pi internet connectivity.
+- Confirm ElevenLabs/OpenAI API keys are valid.
+- On failure, text output still appears so the conversation loop keeps working.
 
-## Future extensions (after this checkpoint)
-1. Button-triggered recording (GPIO input)
-2. Speaker output with text-to-speech
-3. Exhibit-specific knowledge prompts/context injection
-4. Robot movement integration on fixed route
-5. Realtime voice conversation in a later phase (once basic pipeline is stable)
+## Future extensions
+1. GPIO button-triggered recording
+2. Exhibit-specific context injection
+3. Route-based robot movement integration
+4. Realtime voice in later phase after core pipeline is stable
