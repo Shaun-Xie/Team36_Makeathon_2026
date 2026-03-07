@@ -1,6 +1,3 @@
-# Team36_Makeathon_2026
-Team 36 project for makeathon 2026. Innovative and interactive LLM powered robot that enriches an individual's knowledge of the environment.
-
 # Raspberry Pi Voice Input Milestone
 
 ## What this prototype does
@@ -10,8 +7,9 @@ This first checkpoint is a terminal-based Python app for Raspberry Pi 4 Model B 
 2. Saves it as a temporary WAV file
 3. Sends the WAV file to OpenAI speech-to-text
 4. Sends the transcript to an OpenAI text model
-5. Prints both transcript and assistant response
-6. Loops until you type `q` or `quit`
+5. Prints transcript and assistant response
+6. Speaks the assistant response locally on the Pi (`espeak-ng`)
+7. Loops until you type `q` or `quit`
 
 This is intentionally a simple sequential flow (no realtime streaming, no WebSockets, no GUI).
 
@@ -43,7 +41,13 @@ Install system packages:
 
 ```bash
 sudo apt update
-sudo apt install -y alsa-utils python3-venv
+sudo apt install -y alsa-utils python3-venv espeak-ng
+```
+
+Quick speaker test:
+
+```bash
+espeak-ng "Speaker test on Raspberry Pi"
 ```
 
 ## Verify microphone detection
@@ -132,7 +136,7 @@ python voice_milestone.py
 Expected loop:
 - Press Enter to record a ~5s clip
 - Transcript prints
-- Assistant response prints
+- Assistant response prints and is spoken
 - Repeat until `q` / `quit`
 
 ## Troubleshooting
@@ -183,6 +187,14 @@ arecord -l
 - Confirm internet access from Pi.
 - Confirm key is valid and has API access.
 - If model access differs on your account, change `TRANSCRIPTION_MODEL` or `RESPONSE_MODEL` constants in `voice_milestone.py`.
+
+### No speech output from assistant response
+- Confirm speaker/headphone output works from Pi.
+- Test TTS directly:
+  ```bash
+  espeak-ng "This is a test"
+  ```
+- If needed, disable TTS by setting `TTS_ENABLED = False`.
 
 ## Future extensions (after this checkpoint)
 1. Button-triggered recording (GPIO input)

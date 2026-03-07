@@ -15,6 +15,12 @@ RECORD_SECONDS = 5
 SAMPLE_RATE = 16000
 CHANNELS = 1
 AUDIO_DEVICE = None  # Example: "hw:1,0"
+USE_GPIO_BUTTON = False
+BUTTON_GPIO_PIN = 18
+BUTTON_BOUNCE_TIME = 0.10
+TTS_ENABLED = True
+TTS_COMMAND = "espeak-ng"
+TTS_RATE = 165
 SYSTEM_PROMPT = (
     "You are an interactive educational guide for a zoo environment. "
     "Explain things clearly, briefly, and engagingly for general visitors. "
@@ -69,6 +75,32 @@ def ensure_recorder_available(audio_device: Optional[str]) -> None:
                 f"AUDIO_DEVICE '{audio_device}' not found in `arecord -L` output.\n"
                 "Run `arecord -L` or set AUDIO_DEVICE to a valid value."
             )
+
+
+def ensure_tts_available() -> None:
+    """Verify local text-to-speech command exists when enabled."""
+    if not TTS_ENABLED:
+        return
+    if shutil.which(TTS_COMMAND) is None:
+        raise RuntimeError(
+            f"`{TTS_COMMAND}` was not found. Install it with: sudo apt install -y espeak-ng"
+        )
+
+
+def create_gpio_button(pin: int):
+    """Create a GPIO button input using gpiozero."""
+    try:
+        from gpiozero import Button
+    except ImportError as exc:
+        raise RuntimeError(
+            "gpiozero is not installed. Install with: pip install gpiozero "
+            "or sudo apt install -y python3-gpiozero"
+        ) from exc
+
+    try:
+        return Button(pin, pull_up=True, bounce_time=BUTTON_BOUNCE_TIME)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to initialize GPIO button on pin {pin}: {exc}") from exc
 
 
 def create_temp_wav_path() -> str:
@@ -151,6 +183,21 @@ def get_assistant_response(client, transcript: str) -> str:
     return reply
 
 
+def speak_text(text: str) -> None:
+    """Speak assistant text locally on Raspberry Pi using espeak-ng."""
+    if not TTS_ENABLED:
+        return
+    result = subprocess.run(
+        [TTS_COMMAND, "-s", str(TTS_RATE), text],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "Unknown TTS error"
+        raise RuntimeError(f"TTS playback failed.\n{TTS_COMMAND} error: {stderr}")
+
+
 def cleanup_temp_file(path: str) -> None:
     """Best-effort temp file cleanup."""
     try:
@@ -160,12 +207,46 @@ def cleanup_temp_file(path: str) -> None:
         print(f"[WARN] Could not remove temp file {path}: {exc}")
 
 
+def run_interaction_cycle(client) -> None:
+    """Run one record -> transcribe -> respond cycle."""
+    wav_path = create_temp_wav_path()
+    try:
+        print(f"Recording {RECORD_SECONDS} seconds...")
+        record_audio(wav_path, seconds=RECORD_SECONDS)
+
+        print("Transcribing with OpenAI...")
+        transcript = transcribe_audio(client, wav_path)
+        print("\nTranscript:")
+        print(transcript)
+
+        print("\nGenerating assistant response...")
+        response = get_assistant_response(client, transcript)
+        print("\nAssistant response:")
+        print(response)
+
+        if TTS_ENABLED:
+            print("\nSpeaking response...")
+            try:
+                speak_text(response)
+            except RuntimeError as exc:
+                print(f"[WARN] {exc}")
+        print()
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}\n")
+    finally:
+        cleanup_temp_file(wav_path)
+
+
 def main_loop() -> int:
     """Interactive terminal loop."""
+    button = None
     try:
         api_key = check_api_key()
         client = create_openai_client(api_key)
         ensure_recorder_available(AUDIO_DEVICE)
+        ensure_tts_available()
+        if USE_GPIO_BUTTON:
+            button = create_gpio_button(BUTTON_GPIO_PIN)
     except RuntimeError as exc:
         print(f"[ERROR] {exc}")
         return 1
@@ -175,41 +256,39 @@ def main_loop() -> int:
     print(f"Recorder: arecord | Duration: {RECORD_SECONDS}s")
     print(f"Sample rate: {SAMPLE_RATE} Hz | Channels: {CHANNELS}")
     print(f"Audio device: {AUDIO_DEVICE or 'default'}")
-    print("Press Enter to record, or type q / quit to exit.\n")
+    print(f"TTS: {'enabled' if TTS_ENABLED else 'disabled'} ({TTS_COMMAND})")
+    if USE_GPIO_BUTTON:
+        print(f"Input mode: GPIO button on BCM pin {BUTTON_GPIO_PIN}")
+        print("Press the GPIO button to record. Use Ctrl+C to exit.\n")
+    else:
+        print("Input mode: keyboard")
+        print("Press Enter to record, or type q / quit to exit.\n")
 
-    while True:
-        try:
-            user_input = input("> ").strip().lower()
-        except EOFError:
-            print("\nInput closed. Exiting.")
-            return 0
+    try:
+        while True:
+            if USE_GPIO_BUTTON:
+                assert button is not None
+                button.wait_for_press()
+                print("> Button pressed")
+                run_interaction_cycle(client)
+                button.wait_for_release()
+            else:
+                try:
+                    user_input = input("> ").strip().lower()
+                except EOFError:
+                    print("\nInput closed. Exiting.")
+                    return 0
 
-        if user_input in {"q", "quit"}:
-            print("Exiting.")
-            return 0
-        if user_input:
-            print("Press Enter to record, or type q / quit to exit.")
-            continue
-
-        wav_path = create_temp_wav_path()
-        try:
-            print(f"Recording {RECORD_SECONDS} seconds...")
-            record_audio(wav_path, seconds=RECORD_SECONDS)
-
-            print("Transcribing with OpenAI...")
-            transcript = transcribe_audio(client, wav_path)
-            print("\nTranscript:")
-            print(transcript)
-
-            print("\nGenerating assistant response...")
-            response = get_assistant_response(client, transcript)
-            print("\nAssistant response:")
-            print(response)
-            print()
-        except RuntimeError as exc:
-            print(f"[ERROR] {exc}\n")
-        finally:
-            cleanup_temp_file(wav_path)
+                if user_input in {"q", "quit"}:
+                    print("Exiting.")
+                    return 0
+                if user_input:
+                    print("Press Enter to record, or type q / quit to exit.")
+                    continue
+                run_interaction_cycle(client)
+    finally:
+        if button is not None:
+            button.close()
 
 
 if __name__ == "__main__":
