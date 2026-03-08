@@ -36,6 +36,11 @@ ELEVENLABS_SAMPLE_RATE = 16000
 ELEVENLABS_CHANNELS = 1
 TTS_OUTPUT_DEVICE = os.getenv("TTS_OUTPUT_DEVICE", "default")
 # Example Bluetooth ALSA device: bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
+PLAY_INTRO_ON_STARTUP = True
+INTRO_MESSAGE = (
+    "Hi there! I am your zoo guide robot. "
+    "Ask me about animals, habitats, and conservation."
+)
 
 SYSTEM_PROMPT = (
     "You are a friendly interactive zoo guide speaking with visitors in real time. "
@@ -525,6 +530,11 @@ def main_loop() -> int:
             elevenlabs_client = create_elevenlabs_client(elevenlabs_api_key)
             ensure_tts_available()
             tts_ready = True
+            if PLAY_INTRO_ON_STARTUP:
+                try:
+                    speak_text(elevenlabs_client, INTRO_MESSAGE)
+                except RuntimeError as exc:
+                    print(f"[WARN] Intro speech failed: {exc}")
         except RuntimeError as exc:
             print(f"[WARN] ElevenLabs TTS disabled: {exc}")
 
