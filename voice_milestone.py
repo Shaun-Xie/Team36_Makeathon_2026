@@ -21,12 +21,18 @@ BUTTON_BOUNCE_TIME = 0.10
 
 TTS_ENABLED = True
 ELEVENLABS_MODEL_ID = "eleven_turbo_v2_5"
-ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+ELEVENLABS_VOICE_ID = "on7De0nZUAc9uGezUxS6"
 ELEVENLABS_OUTPUT_FORMAT = "pcm_16000"
 ELEVENLABS_SAMPLE_RATE = 16000
 ELEVENLABS_CHANNELS = 1
-TTS_OUTPUT_DEVICE = os.getenv("TTS_OUTPUT_DEVICE", "default")
-# Example Bluetooth ALSA device: bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
+FORCE_LOCAL_SPEAKER_OUTPUT = True
+TTS_OUTPUT_DEVICE = (
+    "default"
+    if FORCE_LOCAL_SPEAKER_OUTPUT
+    else os.getenv("TTS_OUTPUT_DEVICE", "default")
+)
+# If FORCE_LOCAL_SPEAKER_OUTPUT=False, example Bluetooth ALSA device:
+# bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
 
 SYSTEM_PROMPT = (
     "You are a friendly interactive zoo guide speaking with visitors in real time. "
