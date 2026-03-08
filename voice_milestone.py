@@ -15,9 +15,6 @@ RECORD_SECONDS = 5
 SAMPLE_RATE = 16000
 CHANNELS = 1
 AUDIO_DEVICE = None  # Example: "hw:1,0"
-USE_GPIO_BUTTON = False
-BUTTON_GPIO_PIN = 18
-BUTTON_BOUNCE_TIME = 0.10
 
 TTS_ENABLED = True
 ELEVENLABS_MODEL_ID = "eleven_turbo_v2_5"
@@ -25,14 +22,8 @@ ELEVENLABS_VOICE_ID = "on7De0nZUAc9uGezUxS6"
 ELEVENLABS_OUTPUT_FORMAT = "pcm_16000"
 ELEVENLABS_SAMPLE_RATE = 16000
 ELEVENLABS_CHANNELS = 1
-FORCE_LOCAL_SPEAKER_OUTPUT = True
-TTS_OUTPUT_DEVICE = (
-    "default"
-    if FORCE_LOCAL_SPEAKER_OUTPUT
-    else os.getenv("TTS_OUTPUT_DEVICE", "default")
-)
-# If FORCE_LOCAL_SPEAKER_OUTPUT=False, example Bluetooth ALSA device:
-# bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
+TTS_OUTPUT_DEVICE = os.getenv("TTS_OUTPUT_DEVICE", "default")
+# Example Bluetooth ALSA device: bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
 
 SYSTEM_PROMPT = (
     "You are a friendly interactive zoo guide speaking with visitors in real time. "
@@ -142,22 +133,6 @@ def ensure_tts_available() -> None:
                 f"TTS_OUTPUT_DEVICE '{TTS_OUTPUT_DEVICE}' not found in `aplay -L` output.\n"
                 "Run `aplay -L` and set a valid playback device."
             )
-
-
-def create_gpio_button(pin: int):
-    """Create a GPIO button input using gpiozero."""
-    try:
-        from gpiozero import Button
-    except ImportError as exc:
-        raise RuntimeError(
-            "gpiozero is not installed. Install with: pip install gpiozero "
-            "or sudo apt install -y python3-gpiozero"
-        ) from exc
-
-    try:
-        return Button(pin, pull_up=True, bounce_time=BUTTON_BOUNCE_TIME)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to initialize GPIO button on pin {pin}: {exc}") from exc
 
 
 def create_temp_wav_path() -> str:
@@ -369,7 +344,6 @@ def run_interaction_cycle(openai_client, elevenlabs_client=None) -> None:
 
 def main_loop() -> int:
     """Interactive terminal loop."""
-    button = None
     elevenlabs_client = None
     tts_ready = False
 
@@ -377,9 +351,6 @@ def main_loop() -> int:
         openai_api_key = check_api_key()
         openai_client = create_openai_client(openai_api_key)
         ensure_recorder_available(AUDIO_DEVICE)
-
-        if USE_GPIO_BUTTON:
-            button = create_gpio_button(BUTTON_GPIO_PIN)
     except RuntimeError as exc:
         print(f"[ERROR] {exc}")
         return 1
@@ -403,40 +374,24 @@ def main_loop() -> int:
         f"(ElevenLabs voice={ELEVENLABS_VOICE_ID}, model={ELEVENLABS_MODEL_ID}, "
         f"output={TTS_OUTPUT_DEVICE})"
     )
+    print("Input mode: keyboard")
+    print("Press Enter to record, or type q / quit to exit.\n")
 
-    if USE_GPIO_BUTTON:
-        print(f"Input mode: GPIO button on BCM pin {BUTTON_GPIO_PIN}")
-        print("Press the GPIO button to record. Use Ctrl+C to exit.\n")
-    else:
-        print("Input mode: keyboard")
-        print("Press Enter to record, or type q / quit to exit.\n")
+    while True:
+        try:
+            user_input = input("> ").strip().lower()
+        except EOFError:
+            print("\nInput closed. Exiting.")
+            return 0
 
-    try:
-        while True:
-            if USE_GPIO_BUTTON:
-                assert button is not None
-                button.wait_for_press()
-                print("> Button pressed")
-                run_interaction_cycle(openai_client, elevenlabs_client)
-                button.wait_for_release()
-            else:
-                try:
-                    user_input = input("> ").strip().lower()
-                except EOFError:
-                    print("\nInput closed. Exiting.")
-                    return 0
+        if user_input in {"q", "quit"}:
+            print("Exiting.")
+            return 0
+        if user_input:
+            print("Press Enter to record, or type q / quit to exit.")
+            continue
 
-                if user_input in {"q", "quit"}:
-                    print("Exiting.")
-                    return 0
-                if user_input:
-                    print("Press Enter to record, or type q / quit to exit.")
-                    continue
-
-                run_interaction_cycle(openai_client, elevenlabs_client)
-    finally:
-        if button is not None:
-            button.close()
+        run_interaction_cycle(openai_client, elevenlabs_client)
 
 
 if __name__ == "__main__":
