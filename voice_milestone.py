@@ -5,8 +5,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
+import wave
+from collections import deque
 from pathlib import Path
 from typing import Optional
+import audioop
 
 
 TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
@@ -15,6 +19,14 @@ RECORD_SECONDS = 5
 SAMPLE_RATE = 16000
 CHANNELS = 1
 AUDIO_DEVICE = None  # Example: "hw:1,0"
+AUTO_RECORD_ON_VOICE = True
+VAD_FRAME_MS = 30
+VAD_START_THRESHOLD_RMS = 700
+VAD_START_FRAMES = 3
+VAD_PRE_SPEECH_SECONDS = 0.3
+VAD_END_SILENCE_SECONDS = 1.0
+VAD_LISTEN_TIMEOUT_SECONDS = 20.0
+VAD_MAX_RECORD_SECONDS = 15.0
 
 TTS_ENABLED = True
 ELEVENLABS_MODEL_ID = "eleven_turbo_v2_5"
@@ -143,8 +155,153 @@ def create_temp_wav_path() -> str:
     return temp_path
 
 
+def _write_pcm_frames_to_wav(output_wav: str, pcm_frames: list[bytes]) -> None:
+    """Write raw PCM frames to a mono WAV file."""
+    try:
+        with wave.open(output_wav, "wb") as wav_file:
+            wav_file.setnchannels(CHANNELS)
+            wav_file.setsampwidth(2)  # 16-bit PCM
+            wav_file.setframerate(SAMPLE_RATE)
+            wav_file.writeframes(b"".join(pcm_frames))
+    except OSError as exc:
+        raise RuntimeError(f"Failed writing WAV file: {exc}") from exc
+
+
+def _build_arecord_raw_stream_cmd() -> list[str]:
+    """Build command to stream raw PCM from microphone."""
+    cmd = ["arecord", "-q"]
+    if AUDIO_DEVICE:
+        cmd.extend(["-D", AUDIO_DEVICE])
+    cmd.extend(
+        [
+            "-t",
+            "raw",
+            "-f",
+            "S16_LE",
+            "-r",
+            str(SAMPLE_RATE),
+            "-c",
+            str(CHANNELS),
+        ]
+    )
+    return cmd
+
+
+def record_audio_until_silence(output_wav: str) -> None:
+    """Record audio after speech starts and stop after sustained silence."""
+    bytes_per_frame = int(SAMPLE_RATE * CHANNELS * 2 * (VAD_FRAME_MS / 1000.0))
+    if bytes_per_frame <= 0:
+        raise RuntimeError("Invalid VAD frame size configuration.")
+
+    pre_speech_frames = max(1, int(VAD_PRE_SPEECH_SECONDS * 1000 / VAD_FRAME_MS))
+    silence_frames_to_stop = max(1, int(VAD_END_SILENCE_SECONDS * 1000 / VAD_FRAME_MS))
+    max_speech_frames = max(1, int(VAD_MAX_RECORD_SECONDS * 1000 / VAD_FRAME_MS))
+
+    process = subprocess.Popen(
+        _build_arecord_raw_stream_cmd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    detected_speech = False
+    consecutive_speech_frames = 0
+    silence_after_speech = 0
+    pre_roll = deque(maxlen=pre_speech_frames)
+    captured_frames: list[bytes] = []
+    listen_started_at = time.monotonic()
+
+    try:
+        while True:
+            if process.stdout is None:
+                raise RuntimeError("Recorder stream unavailable.")
+
+            chunk = process.stdout.read(bytes_per_frame)
+            if not chunk:
+                stderr_details = ""
+                if process.poll() is not None and process.stderr is not None:
+                    stderr_raw = process.stderr.read()
+                    if stderr_raw:
+                        stderr_details = stderr_raw.decode(
+                            "utf-8", errors="replace"
+                        ).strip()
+                if stderr_details:
+                    lowered = stderr_details.lower()
+                    if "no such file" in lowered or "cannot find card" in lowered:
+                        raise RuntimeError(
+                            "Recording failed: microphone/device not found.\n"
+                            f"arecord error: {stderr_details}\n"
+                            "Use `arecord -l` to identify the correct capture device."
+                        )
+                    raise RuntimeError(
+                        f"Recording failed while listening for speech.\narecord error: {stderr_details}"
+                    )
+                raise RuntimeError("Recording stream ended unexpectedly.")
+            if len(chunk) < bytes_per_frame:
+                chunk = chunk.ljust(bytes_per_frame, b"\x00")
+
+            frame_rms = audioop.rms(chunk, 2)
+            is_speech = frame_rms >= VAD_START_THRESHOLD_RMS
+
+            if not detected_speech:
+                pre_roll.append(chunk)
+                consecutive_speech_frames = (
+                    consecutive_speech_frames + 1 if is_speech else 0
+                )
+
+                if consecutive_speech_frames >= VAD_START_FRAMES:
+                    detected_speech = True
+                    captured_frames.extend(pre_roll)
+                    silence_after_speech = 0
+            else:
+                captured_frames.append(chunk)
+                if is_speech:
+                    silence_after_speech = 0
+                else:
+                    silence_after_speech += 1
+
+                if silence_after_speech >= silence_frames_to_stop:
+                    break
+
+                if len(captured_frames) >= max_speech_frames:
+                    break
+
+            if (
+                not detected_speech
+                and (time.monotonic() - listen_started_at) > VAD_LISTEN_TIMEOUT_SECONDS
+            ):
+                raise RuntimeError(
+                    "No speech detected before timeout. Try speaking louder or adjust threshold."
+                )
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        if process.stderr:
+            process.stderr.close()
+
+    if not captured_frames:
+        raise RuntimeError("Speech was not captured.")
+
+    _write_pcm_frames_to_wav(output_wav, captured_frames)
+    wav_path = Path(output_wav)
+    if not wav_path.exists():
+        raise RuntimeError("Recording failed: WAV file was not created.")
+    if wav_path.stat().st_size <= 44:
+        raise RuntimeError("Recording appears empty (no audio frames in WAV file).")
+
+
 def record_audio(output_wav: str, seconds: int = RECORD_SECONDS) -> None:
     """Record local audio clip using arecord."""
+    if AUTO_RECORD_ON_VOICE:
+        record_audio_until_silence(output_wav)
+        return
+
     cmd = ["arecord", "-q"]
     if AUDIO_DEVICE:
         cmd.extend(["-D", AUDIO_DEVICE])
@@ -313,7 +470,10 @@ def run_interaction_cycle(openai_client, elevenlabs_client=None) -> None:
     """Run one record -> transcribe -> respond cycle."""
     wav_path = create_temp_wav_path()
     try:
-        print(f"Recording {RECORD_SECONDS} seconds...")
+        if AUTO_RECORD_ON_VOICE:
+            print("Listening for speech...")
+        else:
+            print(f"Recording {RECORD_SECONDS} seconds...")
         record_audio(wav_path, seconds=RECORD_SECONDS)
 
         print("Transcribing with OpenAI...")
@@ -337,7 +497,11 @@ def run_interaction_cycle(openai_client, elevenlabs_client=None) -> None:
 
         print()
     except RuntimeError as exc:
-        print(f"[ERROR] {exc}\n")
+        message = str(exc)
+        if message.startswith("No speech detected"):
+            print(f"[INFO] {message}\n")
+        else:
+            print(f"[ERROR] {message}\n")
     finally:
         cleanup_temp_file(wav_path)
 
@@ -374,24 +538,34 @@ def main_loop() -> int:
         f"(ElevenLabs voice={ELEVENLABS_VOICE_ID}, model={ELEVENLABS_MODEL_ID}, "
         f"output={TTS_OUTPUT_DEVICE})"
     )
-    print("Input mode: keyboard")
-    print("Press Enter to record, or type q / quit to exit.\n")
+    if AUTO_RECORD_ON_VOICE:
+        print("Input mode: voice-activated")
+        print(
+            "Speak naturally. Recording starts when speech is detected and "
+            f"stops after about {VAD_END_SILENCE_SECONDS:.1f}s of silence."
+        )
+        print("Press Ctrl+C to exit.\n")
+        while True:
+            run_interaction_cycle(openai_client, elevenlabs_client)
+    else:
+        print("Input mode: keyboard")
+        print("Press Enter to record, or type q / quit to exit.\n")
 
-    while True:
-        try:
-            user_input = input("> ").strip().lower()
-        except EOFError:
-            print("\nInput closed. Exiting.")
-            return 0
+        while True:
+            try:
+                user_input = input("> ").strip().lower()
+            except EOFError:
+                print("\nInput closed. Exiting.")
+                return 0
 
-        if user_input in {"q", "quit"}:
-            print("Exiting.")
-            return 0
-        if user_input:
-            print("Press Enter to record, or type q / quit to exit.")
-            continue
+            if user_input in {"q", "quit"}:
+                print("Exiting.")
+                return 0
+            if user_input:
+                print("Press Enter to record, or type q / quit to exit.")
+                continue
 
-        run_interaction_cycle(openai_client, elevenlabs_client)
+            run_interaction_cycle(openai_client, elevenlabs_client)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@
 This terminal-based Raspberry Pi 4 app does:
 
 1. Record a short local microphone clip with `arecord`
+   - starts when speech is detected
+   - stops after short silence
 2. Transcribe it with OpenAI speech-to-text
 3. Generate a response with an OpenAI model
 4. Print transcript and assistant response
@@ -142,11 +144,13 @@ python voice_milestone.py
 ```
 
 Loop behavior:
-- Press `Enter` to record
+- App listens for speech automatically
+- Recording starts when speech is detected
+- Recording stops after short silence
 - Transcript prints
 - Assistant response prints
 - ElevenLabs audio plays
-- Type `q` or `quit` to exit
+- Press `Ctrl+C` to exit
 
 ## Test ElevenLabs TTS path independently
 Run this standalone test on the Pi:
@@ -157,7 +161,7 @@ import os
 import subprocess
 from elevenlabs.client import ElevenLabs
 
-voice_id = "EXAVITQu4vr4xnSDxMaL"
+voice_id = "on7De0nZUAc9uGezUxS6"
 model_id = "eleven_turbo_v2_5"
 output_format = "pcm_16000"
 output_device = os.getenv("TTS_OUTPUT_DEVICE", "default")
@@ -236,6 +240,14 @@ aplay -D "$TTS_OUTPUT_DEVICE" -f S16_LE -r 16000 -c 1 /tmp/elevenlabs_test.pcm
 - Confirm Pi internet connectivity.
 - Confirm ElevenLabs/OpenAI API keys are valid.
 - On failure, text output still appears so the conversation loop keeps working.
+
+### No speech detected / keeps timing out
+- Speak closer to the microphone and increase capture gain (`alsamixer`).
+- Adjust VAD settings in `voice_milestone.py`:
+  - `VAD_START_THRESHOLD_RMS` (lower it if normal speech is missed)
+  - `VAD_END_SILENCE_SECONDS` (increase if recordings end too early)
+  - `VAD_LISTEN_TIMEOUT_SECONDS` (increase if users pause before speaking)
+  - `VAD_MAX_RECORD_SECONDS` (increase for longer questions)
 
 ## Future extensions
 1. GPIO button-triggered recording
