@@ -38,8 +38,7 @@ TTS_OUTPUT_DEVICE = os.getenv("TTS_OUTPUT_DEVICE", "default")
 # Example Bluetooth ALSA device: bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp
 PLAY_INTRO_ON_STARTUP = True
 INTRO_MESSAGE = (
-    "Hi there! I am your zoo guide robot. "
-    "Ask me about animals, habitats, and conservation."
+    "Hi there! I am your zoo guide robot. Ask me about animals, habitats, and conservation. "
 )
 
 SYSTEM_PROMPT = (
