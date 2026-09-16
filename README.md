@@ -4,6 +4,10 @@
 
 # Raspberry Pi Voice Input Milestone (OpenAI + ElevenLabs)
 
+https://github.com/user-attachments/assets/36ef7ddc-44fc-475d-bcf1-a61d01643f9b
+
+
+
 ## What this prototype does
 This terminal-based Raspberry Pi 4 app does:
 
