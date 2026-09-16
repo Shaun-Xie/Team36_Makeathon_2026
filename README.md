@@ -1,3 +1,7 @@
+
+
+
+
 # Raspberry Pi Voice Input Milestone (OpenAI + ElevenLabs)
 
 ## What this prototype does
